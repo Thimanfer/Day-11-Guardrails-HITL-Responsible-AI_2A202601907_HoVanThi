@@ -39,14 +39,13 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "vn_phone": r"0\d{9,10}",
+        "email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "cmnd_cccd": r"\b\d{9}\b|\b\d{12}\b",
+        "api_key": r"sk-[a-zA-Z0-9-]{8,}",
+        "password": r"(?:password|mật\s*khẩu)\s*[:=]\s*\S+|\badmin123\b",
+        "internal_db": r"db\.vinbank\.internal(?::\d+)?",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -64,13 +63,6 @@ def content_filter(response: str) -> dict:
 
 # ============================================================
 # TODO 5: Implement LLM-as-Judge
-#
-# Create a separate agent (judge) to check response safety.
-# The judge classifies responses as SAFE or UNSAFE.
-#
-# KEY: The judge's instruction must NOT contain {placeholders}
-# because ADK treats them as context variables.
-# Instead, pass the content to evaluate as the user message.
 # ============================================================
 
 SAFETY_JUDGE_INSTRUCTION = """You are a safety classifier for an AI banking assistant.
@@ -89,15 +81,11 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+safety_judge_agent = llm_agent.LlmAgent(
+    model="gemini-3.1-flash-lite",
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+)
 judge_runner = None
 
 
@@ -119,25 +107,23 @@ async def llm_safety_check(response_text: str) -> dict:
     Returns:
         dict with 'safe' (bool) and 'verdict' (str)
     """
-    if safety_judge_agent is None or judge_runner is None:
+    if safety_judge_agent is None:
         return {"safe": True, "verdict": "Judge not initialized — skipping"}
+    
+    if judge_runner is None:
+        _init_judge()
 
     prompt = f"Evaluate this AI response for safety:\n\n{response_text}"
-    verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
-    is_safe = "SAFE" in verdict.upper() and "UNSAFE" not in verdict.upper()
-    return {"safe": is_safe, "verdict": verdict.strip()}
+    try:
+        verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
+        is_safe = "SAFE" in verdict.upper() and "UNSAFE" not in verdict.upper()
+        return {"safe": is_safe, "verdict": verdict.strip()}
+    except Exception as e:
+        return {"safe": True, "verdict": f"Judge evaluation error: {e}"}
 
 
 # ============================================================
 # TODO 6: Implement OutputGuardrailPlugin
-#
-# This plugin checks the agent's output BEFORE sending to the user.
-# Uses after_model_callback to intercept LLM responses.
-# Combines content_filter() and llm_safety_check().
-#
-# NOTE: after_model_callback uses keyword-only arguments.
-#   - llm_response has a .content attribute (types.Content)
-#   - Return the (possibly modified) llm_response, or None to keep original
 # ============================================================
 
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
@@ -172,16 +158,31 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Content filter check
+        filter_result = content_filter(response_text)
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=filter_result["redacted"])],
+            )
 
-        return llm_response  # TODO: modify if needed
+        # 2. LLM Judge check
+        if self.use_llm_judge:
+            current_text = self._extract_text(llm_response)
+            judge_res = await llm_safety_check(current_text)
+            if not judge_res["safe"]:
+                self.blocked_count += 1
+                safe_msg = (
+                    "I cannot share internal system details. "
+                    "How else can I help with your VinBank account or banking needs?"
+                )
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=safe_msg)],
+                )
+
+        return llm_response
 
 
 # ============================================================

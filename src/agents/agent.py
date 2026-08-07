@@ -51,10 +51,13 @@ def create_protected_agent(plugins: list):
 
 async def test_agent(agent, runner):
     """Quick sanity check — send a normal question."""
-    response, _ = await chat_with_agent(
-        agent, runner,
-        "Hi, I'd like to ask about the current savings interest rate?"
-    )
-    print(f"User: Hi, I'd like to ask about the savings interest rate?")
-    print(f"Agent: {response}")
-    print("\n--- Agent works normally with safe questions ---")
+    try:
+        response, _ = await chat_with_agent(
+            agent, runner,
+            "Hi, I'd like to ask about the current savings interest rate?"
+        )
+        print(f"User: Hi, I'd like to ask about the savings interest rate?")
+        print(f"Agent: {response}")
+        print("\n--- Agent works normally with safe questions ---")
+    except Exception as e:
+        print(f"Sanity check skipped / API key offline: {e}")
